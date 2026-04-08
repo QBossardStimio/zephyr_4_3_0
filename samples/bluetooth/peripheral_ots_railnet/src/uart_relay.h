@@ -15,6 +15,7 @@
  *   0x03 ACK          : accusé de réception
  *   0x04 NACK         : erreur (1 octet payload = code erreur)
  *   0x05 STATUS       : statut périodique NINA
+ *   0x06 FILE_REQUEST : demande de fichier BLE → iMX6
  */
 
 #ifndef UART_RELAY_H_
@@ -29,6 +30,7 @@
 #define SOTP_TYPE_ACK           0x03
 #define SOTP_TYPE_NACK          0x04
 #define SOTP_TYPE_STATUS        0x05
+#define SOTP_TYPE_FILE_REQUEST  0x06
 
 /** Codes d'erreur NACK */
 #define SOTP_ERR_BUFFER_FULL    0x01
@@ -48,5 +50,16 @@ int uart_relay_init(void);
  * @return 0 si succès, code d'erreur négatif sinon.
  */
 int uart_relay_send_object(const uint8_t *data, size_t len);
+
+/**
+ * @brief Envoie une requête de fichier vers l'iMX6 (trame FILE_REQUEST).
+ *
+ * Le sotp-bridge lit le fichier et le renvoie en OBJ_TO_BLE.
+ *
+ * @param path    Chemin du fichier (UTF-8, pas de null-terminator requis).
+ * @param len     Longueur du chemin en octets.
+ * @return 0 si succès, code d'erreur négatif sinon.
+ */
+int uart_relay_send_file_request(const uint8_t *path, size_t len);
 
 #endif /* UART_RELAY_H_ */

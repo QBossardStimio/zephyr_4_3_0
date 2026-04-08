@@ -347,18 +347,31 @@ static ssize_t obj_write(struct bt_ots *ots, struct bt_conn *conn, uint64_t id,
 
 	/* Dernier fragment : objet complet → relayer vers iMX6 via SOTP, puis libérer */
 	if (remaining == 0) {
-		LOG_INF("obj_write: object complete id=0x%012llx total=%u bytes → UART relay",
-			(unsigned long long)id, obj_pool[idx].written_len);
+		LOG_INF("obj_write: object complete id=0x%012llx total=%u bytes name='%s'",
+			(unsigned long long)id, obj_pool[idx].written_len,
+			obj_pool[idx].name);
 
-		int err = uart_relay_send_object(obj_pool[idx].data,
-						 obj_pool[idx].written_len);
-		if (err) {
+		int err;
+
+		if (strcmp(obj_pool[idx].name, "FILE_REQ") == 0) {
 			/*
-			 * Ne pas retourner d'erreur au client BLE :
-			 * l'écriture OTS a réussi côté nRF52840.
-			 * L'échec du relay UART est loggé pour debug.
+			 * Requête de fichier : le payload contient le chemin
+			 * du fichier demandé. Envoyer comme FILE_REQUEST (0x06)
+			 * au sotp-bridge qui lira le fichier et le renverra
+			 * en OBJ_TO_BLE.
 			 */
-			LOG_ERR("obj_write: uart_relay_send_object failed: %d", err);
+			err = uart_relay_send_file_request(
+					obj_pool[idx].data,
+					obj_pool[idx].written_len);
+			if (err) {
+				LOG_ERR("obj_write: send_file_request failed: %d", err);
+			}
+		} else {
+			err = uart_relay_send_object(obj_pool[idx].data,
+						     obj_pool[idx].written_len);
+			if (err) {
+				LOG_ERR("obj_write: send_object failed: %d", err);
+			}
 		}
 
 		/* Différer bt_ots_obj_delete via k_work.
