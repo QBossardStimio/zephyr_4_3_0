@@ -92,15 +92,22 @@ static atomic_t tx_ack_result;  /* 0 = ACK, >0 = NACK code */
 /* -------------------------------------------------------------------------
  * Fonctions CRC
  *
- * CRC16-CCITT calculé sur les champs TYPE(1) + LEN(4) + PAYLOAD(N).
- * On utilise crc16_ccitt() de Zephyr (poly=0x1021, seed configurable).
+ * CRC16-CCITT reflected calculé sur les champs TYPE(1) + LEN(4) + PAYLOAD(N).
+ * On utilise crc16_reflect() de Zephyr (poly=0x8408, seed=0xFFFF).
+ *
+ * IMPORTANT : sotp-bridge.c et sotp-send.c côté iMX6 Linux utilisent cette
+ * même variante reflected (poly 0x8408 = bit-reversed de 0x1021).
+ * crc16_ccitt() de Zephyr est une variante CCITT-FALSE différente qui
+ * produit des résultats incompatibles → CRC mismatch systématique.
  * ------------------------------------------------------------------------- */
+#define SOTP_CRC_POLY 0x8408U
+
 static uint16_t sotp_crc(uint8_t type, uint32_t len, const uint8_t *payload)
 {
 	uint16_t crc = SOTP_CRC_SEED;
 
 	/* Inclure TYPE dans le CRC */
-	crc = crc16_ccitt(crc, &type, 1);
+	crc = crc16_reflect(SOTP_CRC_POLY, crc, &type, 1);
 
 	/* Inclure LEN (4 octets little-endian) dans le CRC */
 	uint8_t len_bytes[4] = {
@@ -109,11 +116,11 @@ static uint16_t sotp_crc(uint8_t type, uint32_t len, const uint8_t *payload)
 		(uint8_t)((len >> 16) & 0xFFU),
 		(uint8_t)((len >> 24) & 0xFFU),
 	};
-	crc = crc16_ccitt(crc, len_bytes, sizeof(len_bytes));
+	crc = crc16_reflect(SOTP_CRC_POLY, crc, len_bytes, sizeof(len_bytes));
 
 	/* Inclure PAYLOAD dans le CRC (si présent) */
 	if (payload && len > 0U) {
-		crc = crc16_ccitt(crc, payload, (size_t)len);
+		crc = crc16_reflect(SOTP_CRC_POLY, crc, payload, (size_t)len);
 	}
 
 	return crc;
@@ -247,20 +254,33 @@ static void sotp_dispatch(uint8_t type, const uint8_t *payload, uint32_t len)
 	case SOTP_TYPE_OBJ_TO_BLE:
 		/*
 		 * L'iMX6 envoie un objet à destination d'un client BLE.
+		 * Format payload : [NAME_LEN uint8][NAME][DATA]
 		 * On l'ajoute dans le pool OTS — un client connecté pourra le lire.
-		 *
-		 * Nom généré automatiquement : "imx6_obj_N" (N = compteur).
 		 */
 		LOG_INF("sotp_dispatch: OBJ_TO_BLE len=%u → OTS pool", len);
 		{
-			static uint32_t rx_obj_counter;
-			char name[32];
+			char name[CONFIG_BT_OTS_OBJ_MAX_NAME_LEN + 1];
+			const uint8_t *obj_data = payload;
+			uint32_t obj_len = len;
 
-			snprintf(name, sizeof(name), "imx6_obj_%u",
-				 rx_obj_counter++);
+			if (len >= 1) {
+				uint8_t name_len = payload[0];
+
+				if (name_len > 0 && name_len <= CONFIG_BT_OTS_OBJ_MAX_NAME_LEN
+				    && len >= (uint32_t)(1 + name_len)) {
+					memcpy(name, payload + 1, name_len);
+					name[name_len] = '\0';
+					obj_data = payload + 1 + name_len;
+					obj_len = len - 1 - name_len;
+				} else {
+					static uint32_t rx_obj_counter;
+					snprintf(name, sizeof(name), "imx6_obj_%u",
+						 rx_obj_counter++);
+				}
+			}
 
 			int err = ots_handler_add_object_from_uart(
-					payload, (size_t)len, name);
+					obj_data, (size_t)obj_len, name);
 			if (err) {
 				LOG_ERR("sotp_dispatch: ots_handler_add_object_from_uart "
 					"failed: %d", err);
@@ -409,21 +429,76 @@ static void sotp_rx_byte(uint8_t byte)
 }
 
 /* -------------------------------------------------------------------------
- * Thread RX UART
+ * RX UART — mode interrupt-driven avec ring buffer
+ *
+ * Le mode polling (uart_poll_in + k_sleep) perdait des octets à 115200 baud :
+ * le nRF52840 UARTE en mode poll ne bufferise qu'un seul octet (EVENTS_RXDRDY).
+ * Si le thread sotp_rx ne lit pas avant l'arrivée du suivant → perte.
+ *
+ * Le mode interrupt-driven utilise uart_irq_callback_set() :
+ *   - L'ISR UART lit tous les octets disponibles dans un ring buffer
+ *   - Le thread sotp_rx consomme le ring buffer et alimente la state machine
+ *   - Aucun octet perdu tant que le ring buffer n'est pas plein
+ *
+ * Ring buffer dimensionné à 1024 octets :
+ *   Trame SOTP max = 7 (header) + ~32 KB (payload) + 2 (CRC) = ~32 KB
+ *   Mais le thread consomme en continu → 1024 suffit largement pour
+ *   absorber les bursts à 115200 baud (~14 octets/ms).
  * ------------------------------------------------------------------------- */
 
-/*
- * Stack du thread sotp_rx.
- * 1024 octets :
- *   - sotp_rx_byte() : state machine légère (~100 octets stack frame)
- *   - sotp_dispatch() → ots_handler_add_object_from_uart() : ~256 octets
- *   - LOG_INF() avec RTT : ~128 octets
- *   Total estimé : ~500 octets → 1024 avec marge.
+#define SOTP_RX_RING_SIZE 1024
+
+static uint8_t rx_ring_buf[SOTP_RX_RING_SIZE];
+static volatile uint32_t rx_ring_head; /* écrit par ISR */
+static volatile uint32_t rx_ring_tail; /* lu par thread */
+
+/**
+ * @brief ISR callback UART — lit tous les octets disponibles dans le ring buffer.
+ *
+ * Appelé en contexte ISR par le driver UART nRF quand des données sont disponibles.
+ * On lit en boucle avec uart_fifo_read() pour vider le FIFO hardware.
  */
+static void uart_irq_rx_handler(const struct device *dev, void *user_data)
+{
+	ARG_UNUSED(user_data);
+
+	if (!uart_irq_update(dev)) {
+		return;
+	}
+
+	if (!uart_irq_rx_ready(dev)) {
+		return;
+	}
+
+	uint8_t tmp[32];
+	int len;
+
+	while ((len = uart_fifo_read(dev, tmp, sizeof(tmp))) > 0) {
+		for (int i = 0; i < len; i++) {
+			uint32_t next = (rx_ring_head + 1) % SOTP_RX_RING_SIZE;
+			if (next == rx_ring_tail) {
+				/* Ring buffer plein — octet perdu */
+				atomic_inc(&stat_rx_errors);
+				continue;
+			}
+			rx_ring_buf[rx_ring_head] = tmp[i];
+			rx_ring_head = next;
+		}
+	}
+}
+
 #define SOTP_RX_STACK_SIZE 1024
 
 static K_THREAD_STACK_DEFINE(sotp_rx_stack, SOTP_RX_STACK_SIZE);
 static struct k_thread sotp_rx_thread_data;
+
+/**
+ * @brief Thread sotp_rx — consomme le ring buffer et alimente la state machine.
+ *
+ * Attend un sémaphore quand le ring buffer est vide → pas de busy-wait.
+ * L'ISR poste le sémaphore à chaque réception.
+ */
+static K_SEM_DEFINE(rx_data_sem, 0, 1);
 
 static void sotp_rx_thread_fn(void *p1, void *p2, void *p3)
 {
@@ -431,25 +506,18 @@ static void sotp_rx_thread_fn(void *p1, void *p2, void *p3)
 	ARG_UNUSED(p2);
 	ARG_UNUSED(p3);
 
-	uint8_t byte;
-
-	LOG_INF("sotp_rx thread started");
+	LOG_INF("sotp_rx thread started (IRQ-driven)");
 
 	while (1) {
-		/*
-		 * uart_poll_in() : retourne 0 si un octet est disponible, -1 sinon.
-		 * On cède le CPU (k_sleep 1ms) quand il n'y a rien — évite le
-		 * busy-wait qui monopoliserait le CPU.
-		 *
-		 * Alternative plus efficace : uart_irq_callback_set() avec FIFO.
-		 * Laissé en polling pour simplifier le debug initial.
-		 * TODO : passer IRQ-driven si le 1ms de latence pose problème.
-		 */
-		if (uart_poll_in(uart_dev, &byte) == 0) {
+		/* Consommer tout ce qui est dans le ring buffer */
+		while (rx_ring_tail != rx_ring_head) {
+			uint8_t byte = rx_ring_buf[rx_ring_tail];
+			rx_ring_tail = (rx_ring_tail + 1) % SOTP_RX_RING_SIZE;
 			sotp_rx_byte(byte);
-		} else {
-			k_sleep(K_MSEC(1));
 		}
+
+		/* Attendre que l'ISR signale de nouvelles données */
+		k_sleep(K_MSEC(1));
 	}
 }
 
@@ -469,7 +537,13 @@ int uart_relay_init(void)
 	memset(&rx_ctx, 0, sizeof(rx_ctx));
 	rx_ctx.state = SOTP_RX_WAIT_SYNC_0;
 
-	/* Lancer le thread de réception SOTP */
+	/* Configurer le mode interrupt-driven RX :
+	 * L'ISR uart_irq_rx_handler lit les octets dans le ring buffer.
+	 * Le thread sotp_rx consomme le ring buffer. */
+	uart_irq_callback_set(uart_dev, uart_irq_rx_handler);
+	uart_irq_rx_enable(uart_dev);
+
+	/* Lancer le thread de consommation SOTP */
 	k_thread_create(&sotp_rx_thread_data,
 			sotp_rx_stack,
 			K_THREAD_STACK_SIZEOF(sotp_rx_stack),
@@ -480,7 +554,7 @@ int uart_relay_init(void)
 			K_NO_WAIT);
 	k_thread_name_set(&sotp_rx_thread_data, "sotp_rx");
 
-	LOG_INF("uart_relay_init: UART '%s' ready, sotp_rx thread started",
+	LOG_INF("uart_relay_init: UART '%s' ready, IRQ RX + sotp_rx thread started",
 		uart_dev->name);
 
 	return 0;
