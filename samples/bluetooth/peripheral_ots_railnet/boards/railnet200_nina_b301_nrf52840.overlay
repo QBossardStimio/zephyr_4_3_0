@@ -38,8 +38,17 @@
 };
 
 /*
- * Pour passer à 1 Mbaud sur RailNet200 v1.3 (si RTS/CTS câblés) :
- * décommenter ce bloc et vérifier les schémas PDF d'abord.
+ * Baudrate UART vers iMX6.
+ * À 115200 : une trame SOTP de 30 KB prend ~2.7s → fenêtre d'interférence USB modem.
+ * À 1 Mbaud : ~0.3s → beaucoup moins de risque de corruption.
+ *
+ * IMPORTANT : le sotp-bridge côté iMX6 doit être compilé au même baudrate.
+ * Décommenter pour 1 Mbaud quand le sotp-bridge iMX6 est aussi à 1 Mbaud.
+ */
+/*
+ * 1 Mbaud + hw-flow-control : nécessite vérification du DTS iMX6
+ * (pins RTS/CTS ttymxc7 dans le pinmux). Bloqué tant que le iMX6
+ * n'asserte pas RTS → NINA CTS inactif → uart_poll_out bloque.
  *
  * &uart0 {
  *     current-speed = <1000000>;

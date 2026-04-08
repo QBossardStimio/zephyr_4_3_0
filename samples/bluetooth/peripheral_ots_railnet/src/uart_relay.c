@@ -78,6 +78,18 @@ static atomic_t stat_rx_frames;
 static atomic_t stat_rx_errors;
 
 /* -------------------------------------------------------------------------
+ * ACK/NACK synchronisation pour retry
+ *
+ * uart_relay_send_object() envoie la trame SOTP puis attend un ACK/NACK
+ * du sotp-bridge iMX6. Le thread sotp_rx poste le résultat via ce semaphore.
+ * ------------------------------------------------------------------------- */
+#define SOTP_TX_MAX_RETRIES  3
+#define SOTP_TX_ACK_TIMEOUT  K_SECONDS(5)
+
+static K_SEM_DEFINE(tx_ack_sem, 0, 1);
+static atomic_t tx_ack_result;  /* 0 = ACK, >0 = NACK code */
+
+/* -------------------------------------------------------------------------
  * Fonctions CRC
  *
  * CRC16-CCITT calculé sur les champs TYPE(1) + LEN(4) + PAYLOAD(N).
@@ -181,6 +193,12 @@ int uart_relay_send_object(const uint8_t *data, size_t len)
 	LOG_INF("uart_relay_send_object: %zu bytes → iMX6", len);
 	sotp_send_frame(SOTP_TYPE_OBJ_FROM_BLE, data, (uint32_t)len);
 
+	/* Ne pas bloquer ici — obj_write est appelé depuis le thread BT RX.
+	 * Bloquer ici gèlerait le stack BLE (GATT Unlikely Error sur le chunk suivant).
+	 * Le ACK/NACK du sotp-bridge est loggé par sotp_dispatch mais pas attendu.
+	 * Le retry sera géré dans une future version via un work queue dédié.
+	 */
+
 	return 0;
 }
 
@@ -257,13 +275,19 @@ static void sotp_dispatch(uint8_t type, const uint8_t *payload, uint32_t len)
 
 	case SOTP_TYPE_ACK:
 		LOG_DBG("sotp_dispatch: ACK from iMX6");
+		atomic_set(&tx_ack_result, 0);
+		k_sem_give(&tx_ack_sem);
 		break;
 
 	case SOTP_TYPE_NACK:
 		if (len >= 1U) {
 			LOG_WRN("sotp_dispatch: NACK from iMX6, code=0x%02x",
 				payload[0]);
+			atomic_set(&tx_ack_result, (atomic_val_t)payload[0]);
+		} else {
+			atomic_set(&tx_ack_result, 0xFF);
 		}
+		k_sem_give(&tx_ack_sem);
 		break;
 
 	case SOTP_TYPE_STATUS:
