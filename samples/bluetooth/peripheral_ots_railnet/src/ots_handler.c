@@ -80,6 +80,16 @@ static uint32_t obj_count;
  */
 static char const *pending_name;
 
+/**
+ * @brief Taille des données pré-remplies lors d'une création côté serveur.
+ *
+ * Positionné par ots_handler_add_object_from_uart() en même temps que pending_name.
+ * Utilisé par obj_created() pour retourner size.cur = pending_data_len au lieu de 0.
+ * Sans cela, Zephyr OTS voit l'objet comme vide (size.cur=0) et OLCP peut
+ * ne pas le rendre accessible à la navigation.
+ */
+static uint32_t pending_data_len;
+
 /** Instance OTS Zephyr — obtenue via bt_ots_free_instance_get() dans ots_handler_init() */
 static struct bt_ots *ots_instance;
 
@@ -180,7 +190,15 @@ static int obj_created(struct bt_ots *ots, struct bt_conn *conn, uint64_t id,
 	/* Remplir le descripteur retourné à la stack Zephyr OTS */
 	created_desc->name       = obj_pool[idx].name;
 	created_desc->size.alloc = add_param->size;
-	created_desc->size.cur   = 0; /* aucune donnée écrite pour l'instant */
+
+	/*
+	 * size.cur :
+	 *   - Création client BLE (OACP Create) : 0, les données arrivent ensuite via OACP Write.
+	 *   - Création serveur (add_object_from_uart) : pending_data_len, car les données
+	 *     sont copiées immédiatement après bt_ots_obj_add(). Sans cela, Zephyr OTS
+	 *     voit l'objet comme vide et un client BLE ne peut pas le lire via OACP Read.
+	 */
+	created_desc->size.cur   = pending_name ? pending_data_len : 0;
 
 	/* Propriétés : l'objet peut être lu, écrit (avec patch), supprimé */
 	created_desc->props = 0;
@@ -518,7 +536,8 @@ int ots_handler_add_object_from_uart(const uint8_t *data, size_t len,
 	 * appellent ots_handler_add_object_from_uart() en parallèle.
 	 * Dans notre cas, seul le thread sotp_rx appelle cette fonction → OK.
 	 */
-	pending_name = name;
+	pending_name     = name;
+	pending_data_len = (uint32_t)len;
 
 	param.size           = (uint32_t)len;
 	param.type.uuid.type = BT_UUID_TYPE_16;
@@ -526,7 +545,8 @@ int ots_handler_add_object_from_uart(const uint8_t *data, size_t len,
 
 	err = bt_ots_obj_add(ots_instance, &param);
 
-	pending_name = NULL;
+	pending_name     = NULL;
+	pending_data_len = 0;
 
 	if (err < 0) {
 		LOG_ERR("bt_ots_obj_add failed: %d", err);
