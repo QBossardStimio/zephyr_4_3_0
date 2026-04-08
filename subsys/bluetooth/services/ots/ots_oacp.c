@@ -624,8 +624,18 @@ static ssize_t oacp_write_proc_cb(struct bt_gatt_ots_l2cap *l2cap_ctx,
 
 #if defined(CONFIG_BT_L2CAP_SEG_RECV)
 /* Callback seg_rx_done : appelé pour chaque segment PDU reçu.
- * seg_offset est l'offset du segment dans le SDU (= objet complet).
- * On utilise seg_offset pour calculer l'offset dans l'objet.
+ *
+ * Calcul de l'offset dans l'objet :
+ *   On utilise write_op->recv_len (total des bytes déjà écrits) plutôt que
+ *   seg_offset (offset dans le SDU courant). Cela permet deux modes :
+ *
+ *   1. Un seul gros SDU (multi-PDU) : seg_offset progresse dans le SDU,
+ *      mais recv_len donne le même résultat car recv_len == seg_offset
+ *      quand il n'y a qu'un seul SDU.
+ *
+ *   2. Plusieurs petits SDUs (1 PDU chacun) : seg_offset est toujours 0
+ *      pour chaque nouveau SDU, mais recv_len s'accumule correctement
+ *      à travers les SDUs successifs.
  */
 static ssize_t oacp_write_seg_cb(struct bt_gatt_ots_l2cap *l2cap_ctx,
 				 struct bt_conn *conn, size_t sdu_len,
@@ -636,6 +646,7 @@ static ssize_t oacp_write_seg_cb(struct bt_gatt_ots_l2cap *l2cap_ctx,
 	off_t offset;
 
 	ARG_UNUSED(sdu_len);
+	ARG_UNUSED(seg_offset);
 
 	ots = CONTAINER_OF(l2cap_ctx, struct bt_ots, l2cap);
 
@@ -645,7 +656,7 @@ static ssize_t oacp_write_seg_cb(struct bt_gatt_ots_l2cap *l2cap_ctx,
 	}
 
 	write_op = &ots->cur_obj->state.write_op;
-	offset = write_op->oacp_params.offset + seg_offset;
+	offset = write_op->oacp_params.offset + write_op->recv_len;
 
 	return oacp_write_common(l2cap_ctx, conn, seg->data, seg->len, offset);
 }
