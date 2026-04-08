@@ -1,0 +1,68 @@
+/*
+ * Copyright (c) 2025 Naonext
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/*
+ * Railnet200 - NINA-B301 HCI UART board definition
+ *
+ * This board targets the u-blox NINA-B301-00B (U22) embedded on the
+ * Naonext Railnet200 carrier board. The nRF52840 inside the NINA-B301
+ * exposes a Bluetooth HCI controller over UART0 to the iMX6 host CPU.
+ *
+ * The NINA-B301 is powered from VCC_3V3_BT (derived from VCC_3V3_CPU).
+ * BLE_RESET_N is driven by the GPIO expander (PCAL9555A, P07) on the
+ * host side — not wired to a nRF52840 GPIO, so no reset node here.
+ *
+ * Use this board target with the zephyr/samples/bluetooth/hci_uart sample.
+ */
+
+/dts-v1/;
+#include <nordic/nrf52840_qiaa.dtsi>
+#include <nordic/nrf52840_partition.dtsi>
+#include "railnet200_nina_b301_nrf52840-pinctrl.dtsi"
+
+/ {
+	model = "Naonext Railnet200 NINA-B301 nRF52840";
+	compatible = "naonext,railnet200-nina-b301-nrf52840";
+
+	chosen {
+		zephyr,bt-c2h-uart = &uart0;
+	};
+};
+
+&reg1 {
+	regulator-initial-mode = <NRF5X_REG_MODE_DCDC>;
+};
+
+&gpiote {
+	status = "okay";
+};
+
+&gpio0 {
+	status = "okay";
+};
+
+&gpio1 {
+	status = "okay";
+};
+
+/*
+ * UART0 — HCI H4 transport to iMX6 host
+ *
+ * Baudrate: 1 000 000 bps (standard HCI H4 rate)
+ * Hardware flow control: RTS/CTS enabled
+ */
+&uart0 {
+	compatible = "nordic,nrf-uarte";
+	status = "okay";
+	current-speed = <115200>;
+	/* hw-flow-control; */
+	pinctrl-0 = <&uart0_default>;
+	pinctrl-1 = <&uart0_sleep>;
+	pinctrl-names = "default", "sleep";
+};
+
+&ieee802154 {
+	status = "okay";
+};

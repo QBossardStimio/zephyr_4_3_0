@@ -1,0 +1,6 @@
+# Railnet200 NINA-B301 board configuration
+# Copyright (c) 2025 Naonext
+# SPDX-License-Identifier: Apache-2.0
+
+config BOARD_RAILNET200_NINA_B301
+	select SOC_NRF52840_QIAA

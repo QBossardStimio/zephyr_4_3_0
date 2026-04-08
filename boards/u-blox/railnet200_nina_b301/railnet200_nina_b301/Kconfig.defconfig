@@ -1,0 +1,7 @@
+# Railnet200 NINA-B301 board configuration
+# Copyright (c) 2025 Naonext
+# SPDX-License-Identifier: Apache-2.0
+
+if BOARD_RAILNET200_NINA_B301
+
+endif # BOARD_RAILNET200_NINA_B301
