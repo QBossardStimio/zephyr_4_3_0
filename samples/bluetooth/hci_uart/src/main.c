@@ -41,6 +41,11 @@ static K_FIFO_DEFINE(tx_queue);
 /* RX in terms of bluetooth communication */
 static K_FIFO_DEFINE(uart_tx_queue);
 
+/* Stats counters */
+static atomic_t stat_rx_packets;
+static atomic_t stat_tx_packets;
+static atomic_t stat_rx_bytes;
+
 #define H4_CMD 0x01
 #define H4_ACL 0x02
 #define H4_SCO 0x03
@@ -67,6 +72,9 @@ static int h4_read(const struct device *uart, uint8_t *buf, size_t len)
 	int rx = uart_fifo_read(uart, buf, len);
 
 	LOG_DBG("read %d req %d", rx, len);
+	if (rx > 0) {
+		atomic_add(&stat_rx_bytes, rx);
+	}
 
 	return rx;
 }
@@ -132,6 +140,7 @@ static void rx_isr(void)
 					/* Get expected header size and switch
 					 * to receiving header.
 					 */
+					atomic_inc(&stat_rx_packets);
 					remaining = hdr_len(type);
 					state = ST_HDR;
 				} else {
@@ -274,11 +283,25 @@ static int h4_send(struct net_buf *buf)
 {
 	LOG_DBG("buf %p type %u len %u", buf, buf->data[0], buf->len);
 
+	atomic_inc(&stat_tx_packets);
 	k_fifo_put(&uart_tx_queue, buf);
 	uart_irq_tx_enable(hci_uart_dev);
 
 	return 0;
 }
+
+static void stats_thread_fn(void *p1, void *p2, void *p3)
+{
+	while (1) {
+		k_sleep(K_SECONDS(10));
+		LOG_INF("HCI stats: RX bytes=%ld pkts=%ld | TX pkts=%ld",
+			(long)atomic_get(&stat_rx_bytes),
+			(long)atomic_get(&stat_rx_packets),
+			(long)atomic_get(&stat_tx_packets));
+	}
+}
+
+K_THREAD_DEFINE(stats_thread, 512, stats_thread_fn, NULL, NULL, NULL, K_PRIO_PREEMPT(10), 0, 0);
 
 #if defined(CONFIG_BT_CTLR_ASSERT_HANDLER)
 void bt_ctlr_assert_handle(char *file, uint32_t line)
@@ -406,6 +429,13 @@ int main(void)
 
 	LOG_DBG("Start");
 	__ASSERT(hci_uart_dev, "UART device is NULL");
+
+	/* Set a static public BD address for the controller */
+	static const bt_addr_t bd_addr = { { 0x00, 0xAD, 0x5B, 0xF1, 0xCA, 0xDE } };
+	bt_ctlr_set_public_addr(bd_addr.val);
+	LOG_INF("BD Address: %02X:%02X:%02X:%02X:%02X:%02X",
+		bd_addr.val[5], bd_addr.val[4], bd_addr.val[3],
+		bd_addr.val[2], bd_addr.val[1], bd_addr.val[0]);
 
 	/* Enable the raw interface, this will in turn open the HCI driver */
 	bt_enable_raw(&rx_queue);

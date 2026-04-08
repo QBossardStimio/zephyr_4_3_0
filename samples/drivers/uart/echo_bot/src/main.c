@@ -42,6 +42,7 @@ void serial_cb(const struct device *dev, void *user_data)
 
 	/* read until FIFO empty */
 	while (uart_fifo_read(uart_dev, &c, 1) == 1) {
+		printk("RX: 0x%02x\n", c);
 		if ((c == '\n' || c == '\r') && rx_buf_pos > 0) {
 			/* terminate string */
 			rx_buf[rx_buf_pos] = '\0';
@@ -74,9 +75,25 @@ int main(void)
 {
 	char tx_buf[MSG_SIZE];
 
+	printk("echo_bot main() started\n");
+
 	if (!device_is_ready(uart_dev)) {
-		printk("UART device not found!");
+		printk("UART device not ready!\n");
 		return 0;
+	}
+
+	printk("UART device ready, starting echo\n");
+
+	struct uart_config cfg;
+	if (uart_config_get(uart_dev, &cfg) == 0) {
+		printk("UART config:\n");
+		printk("  baudrate:  %d\n", cfg.baudrate);
+		printk("  parity:    %d\n", cfg.parity);
+		printk("  stop_bits: %d\n", cfg.stop_bits);
+		printk("  data_bits: %d\n", cfg.data_bits);
+		printk("  flow_ctrl: %d\n", cfg.flow_ctrl);
+	} else {
+		printk("uart_config_get failed\n");
 	}
 
 	/* configure interrupt and callback to receive data */
@@ -97,11 +114,13 @@ int main(void)
 	print_uart("Hello! I'm your echo bot.\r\n");
 	print_uart("Tell me something and press enter:\r\n");
 
-	/* indefinitely wait for input from the user */
-	while (k_msgq_get(&uart_msgq, &tx_buf, K_FOREVER) == 0) {
-		print_uart("Echo: ");
-		print_uart(tx_buf);
-		print_uart("\r\n");
+	/* send 0xDE 0xCA 0xFB 0xAD continuously for testing */
+	static const uint8_t pattern[] = { 0xDE, 0xCA, 0xFB, 0xAD };
+	while (1) {
+		for (int i = 0; i < sizeof(pattern); i++) {
+			uart_poll_out(uart_dev, pattern[i]);
+		}
+		k_sleep(K_MSEC(1));
 	}
 	return 0;
 }
