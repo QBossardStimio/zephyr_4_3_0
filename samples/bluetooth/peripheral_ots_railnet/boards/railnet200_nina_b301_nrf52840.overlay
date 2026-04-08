@@ -1,0 +1,48 @@
+/*
+ * railnet200_nina_b301_nrf52840.overlay
+ *
+ * Overlay DTS pour le sample peripheral_ots_railnet.
+ * Appliqué EN PLUS du DTS de base du board par le système de build west/cmake.
+ *
+ * Objectif :
+ *   Déclarer `zephyr,sotp-uart = &uart0` dans /chosen pour que uart_relay.c
+ *   puisse obtenir le device UART via DT_CHOSEN(zephyr_sotp_uart) plutôt
+ *   que DT_CHOSEN(zephyr_bt_c2h_uart) qui appartient sémantiquement à hci_uart.
+ *
+ * Pourquoi non-destructif :
+ *   Le DTS de base (railnet200_nina_b301_nrf52840.dts) conserve
+ *   `zephyr,bt-c2h-uart = &uart0`. Ce chosen n'est utilisé que quand
+ *   CONFIG_BT_HCI_RAW=y (firmware hci_uart). Ce firmware utilise
+ *   CONFIG_BT_HCI_HOST, donc le chosen bt-c2h-uart est ignoré ici.
+ *   Les deux firmwares peuvent coexister sans modifier le DTS partagé.
+ *
+ * Note baudrate :
+ *   - RailNet200 v1.1 : RTS/CTS NON câblés → 115200 baud, noflow (DTS de base)
+ *   - RailNet200 v1.3 : à vérifier sur schémas (docs/reference_schemas_railnet200.md)
+ *     Si RTS/CTS câblés sur v1.3, décommenter le bloc &uart0 ci-dessous
+ *     et augmenter à 1 Mbaud pour réduire la latence de relay.
+ *
+ * Convention de nommage DT_CHOSEN :
+ *   Le nom du chosen node `zephyr,sotp-uart` se mappe vers DT_CHOSEN(zephyr_sotp_uart)
+ *   (Zephyr remplace les tirets par des underscores dans les macros DT_CHOSEN).
+ */
+
+/ {
+	chosen {
+		/*
+		 * SOTP UART : l'UART utilisé par uart_relay.c pour le protocole SOTP
+		 * vers l'iMX6. Même UART physique (uart0) que hci_uart, rôle différent.
+		 */
+		zephyr,sotp-uart = &uart0;
+	};
+};
+
+/*
+ * Pour passer à 1 Mbaud sur RailNet200 v1.3 (si RTS/CTS câblés) :
+ * décommenter ce bloc et vérifier les schémas PDF d'abord.
+ *
+ * &uart0 {
+ *     current-speed = <1000000>;
+ *     hw-flow-control;
+ * };
+ */

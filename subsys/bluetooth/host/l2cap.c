@@ -2685,8 +2685,13 @@ static void l2cap_chan_le_recv_seg_direct(struct bt_l2cap_le_chan *chan, struct 
 	seg_offset = chan->_sdu_len_done;
 	sdu_remaining = chan->_sdu_len - chan->_sdu_len_done;
 
+	LOG_DBG("seg_recv: chan %p sdu_len %u sdu_len_done %u seg_len %u sdu_remaining %u",
+		chan, chan->_sdu_len, chan->_sdu_len_done, seg->len, sdu_remaining);
+
 	if (seg->len > sdu_remaining) {
-		LOG_WRN("L2CAP RX PDU total exceeds SDU");
+		LOG_WRN("L2CAP RX PDU total exceeds SDU: seg_len %u > sdu_remaining %u"
+			" (sdu_len %u sdu_len_done %u)",
+			seg->len, sdu_remaining, chan->_sdu_len, chan->_sdu_len_done);
 		bt_l2cap_chan_disconnect(&chan->chan);
 		return;
 	}
