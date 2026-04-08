@@ -96,6 +96,9 @@ static struct bt_ots *ots_instance;
 /* Macro de mapping ID → index de slot (identique au sample upstream) */
 #define OBJ_ID_TO_IDX(id)  (((id) - BT_OTS_OBJ_ID_MIN) % (uint64_t)CONFIG_BT_OTS_MAX_OBJ_CNT)
 
+/** Flag pour exclure les DELETE_ACK pendant le cleanup de déconnexion */
+static bool cleaning_up;
+
 /*
  * Work item pour différer bt_ots_obj_delete après retour de obj_write.
  *
@@ -244,6 +247,21 @@ static int obj_deleted(struct bt_ots *ots, struct bt_conn *conn, uint64_t id)
 		id_str, (unsigned long long)idx,
 		obj_count, ARRAY_SIZE(obj_pool));
 
+	/*
+	 * Envoyer un DELETE_ACK SOTP vers l'iMX6 pour signaler la suppression.
+	 * Le sotp-bridge attend ce DELETE_ACK avant d'envoyer le chunk suivant
+	 * lors d'un FILE_REQUEST multi-chunk.
+	 *
+	 * Note : bt_ots_obj_delete() passe toujours conn=NULL au callback,
+	 * donc on ne peut pas distinguer OACP Delete d'une suppression interne
+	 * via conn. On utilise un flag cleaning_up pour exclure le cleanup
+	 * de déconnexion et le k_work delete (pending_delete_id != 0).
+	 */
+	if (!cleaning_up) {
+		LOG_INF("obj_deleted: sending DELETE_ACK to iMX6");
+		uart_relay_send_delete_ack();
+	}
+
 	return 0;
 }
 
@@ -347,18 +365,31 @@ static ssize_t obj_write(struct bt_ots *ots, struct bt_conn *conn, uint64_t id,
 
 	/* Dernier fragment : objet complet → relayer vers iMX6 via SOTP, puis libérer */
 	if (remaining == 0) {
-		LOG_INF("obj_write: object complete id=0x%012llx total=%u bytes → UART relay",
-			(unsigned long long)id, obj_pool[idx].written_len);
+		LOG_INF("obj_write: object complete id=0x%012llx total=%u bytes name='%s'",
+			(unsigned long long)id, obj_pool[idx].written_len,
+			obj_pool[idx].name);
 
-		int err = uart_relay_send_object(obj_pool[idx].data,
-						 obj_pool[idx].written_len);
-		if (err) {
+		int err;
+
+		if (strcmp(obj_pool[idx].name, "FILE_REQ") == 0) {
 			/*
-			 * Ne pas retourner d'erreur au client BLE :
-			 * l'écriture OTS a réussi côté nRF52840.
-			 * L'échec du relay UART est loggé pour debug.
+			 * Requête de fichier : le payload contient le chemin
+			 * du fichier demandé. Envoyer comme FILE_REQUEST (0x06)
+			 * au sotp-bridge qui lira le fichier et le renverra
+			 * en OBJ_TO_BLE.
 			 */
-			LOG_ERR("obj_write: uart_relay_send_object failed: %d", err);
+			err = uart_relay_send_file_request(
+					obj_pool[idx].data,
+					obj_pool[idx].written_len);
+			if (err) {
+				LOG_ERR("obj_write: send_file_request failed: %d", err);
+			}
+		} else {
+			err = uart_relay_send_object(obj_pool[idx].data,
+						     obj_pool[idx].written_len);
+			if (err) {
+				LOG_ERR("obj_write: send_object failed: %d", err);
+			}
 		}
 
 		/* Différer bt_ots_obj_delete via k_work.
@@ -481,6 +512,8 @@ struct bt_ots *ots_get_instance(void)
 
 void ots_handler_cleanup_on_disconnect(void)
 {
+	cleaning_up = true;
+
 	/*
 	 * Supprimer chaque objet de la stack Zephyr OTS via bt_ots_obj_delete().
 	 * Sans cela, la stack OTS garde ses objets internes même si on remet
@@ -502,6 +535,7 @@ void ots_handler_cleanup_on_disconnect(void)
 		obj_pool[i].name[0]     = '\0';
 	}
 	obj_count = 0;
+	cleaning_up = false;
 	LOG_INF("ots_handler_cleanup_on_disconnect: pool réinitialisé");
 }
 
