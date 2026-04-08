@@ -430,7 +430,10 @@ static void bt_acl_recv(struct bt_conn *conn, struct net_buf *buf,
 		}
 
 		if (buf->len > net_buf_tailroom(conn->rx)) {
-			LOG_ERR("Not enough buffer space for L2CAP data");
+			LOG_ERR("Not enough buffer space for L2CAP data: "
+				"cont_len=%u tailroom=%zu rx_len=%u rx_size=%u",
+				buf->len, net_buf_tailroom(conn->rx),
+				conn->rx->len, conn->rx->size);
 
 			/* Frame is not complete but we still pass it to L2CAP
 			 * so that it may handle error on protocol level
