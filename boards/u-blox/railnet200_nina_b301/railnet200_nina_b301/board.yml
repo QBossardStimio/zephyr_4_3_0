@@ -1,0 +1,6 @@
+board:
+  name: railnet200_nina_b301
+  full_name: Naonext Railnet200 NINA-B301
+  vendor: u-blox
+  socs:
+  - name: nrf52840
