@@ -227,8 +227,10 @@ static ssize_t cp_write_cb(struct bt_conn *conn,
 			status_len = 3;
 		}
 
-		/* Notify status — best effort */
-		bt_gatt_notify(conn, attr - 2, status_value, status_len);
+		/* Notify status — best effort.
+		 * Use NULL for attrs — Zephyr searches all services. */
+		bt_gatt_notify_uuid(conn, &status_uuid.uuid,
+				    NULL, status_value, status_len);
 
 		return len;
 	}
@@ -249,6 +251,43 @@ static ssize_t status_read_cb(struct bt_conn *conn,
 }
 
 /* -------------------------------------------------------------------------
+ * GATT Characteristic User Description (UUID 0x2901)
+ *
+ * Displayed by nRF Connect and other BLE tools so the user knows
+ * which JSON field each characteristic corresponds to.
+ * ------------------------------------------------------------------------- */
+
+static const char field_names[][24] = {
+	[0x00] = "system.host",
+	[0x01] = "system.port",
+	[0x02] = "system.topic_prefix",
+	[0x03] = "system.dns_primary",
+	[0x04] = "system.dns_secondary",
+	[0x05] = "system.enable_tls",
+	[0x06] = "system.cert_reqs",
+	[0x07] = "system.ca_certs",
+	[0x08] = "system.certfile",
+	[0x09] = "system.keyfile",
+	[0x0A] = "system.apn",
+	[0x0B] = "system.ntp_server",
+	[0x0C] = "system.ntp_port",
+	[0x0D] = "system.syslog_ip",
+	[0x0E] = "system.syslog_port",
+	[0x0F] = "system.can_bitrate",
+	[0x10] = "buffer.storage_path",
+	[0x11] = "buffer.max_batch_size",
+};
+
+static ssize_t field_desc_read_cb(struct bt_conn *conn,
+				  const struct bt_gatt_attr *attr,
+				  void *buf, uint16_t len, uint16_t offset)
+{
+	const char *desc = attr->user_data;
+	return bt_gatt_attr_read(conn, attr, buf, len, offset,
+				 desc, strlen(desc));
+}
+
+/* -------------------------------------------------------------------------
  * GATT Service definition
  * ------------------------------------------------------------------------- */
 
@@ -256,7 +295,9 @@ static ssize_t status_read_cb(struct bt_conn *conn,
 	BT_GATT_CHARACTERISTIC(&field_uuids[idx].uuid, \
 		BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE, \
 		BT_GATT_PERM_READ | BT_GATT_PERM_WRITE, \
-		field_read_cb, field_write_cb, NULL)
+		field_read_cb, field_write_cb, NULL), \
+	BT_GATT_DESCRIPTOR(BT_UUID_GATT_CUD, BT_GATT_PERM_READ, \
+		field_desc_read_cb, NULL, (void *)field_names[idx])
 
 BT_GATT_SERVICE_DEFINE(config_svc,
 	BT_GATT_PRIMARY_SERVICE(&svc_uuid),
@@ -266,6 +307,8 @@ BT_GATT_SERVICE_DEFINE(config_svc,
 		BT_GATT_CHRC_WRITE,
 		BT_GATT_PERM_WRITE,
 		NULL, cp_write_cb, NULL),
+	BT_GATT_DESCRIPTOR(BT_UUID_GATT_CUD, BT_GATT_PERM_READ,
+		field_desc_read_cb, NULL, (void *)"commit"),
 
 	/* Status — read + notify */
 	BT_GATT_CHARACTERISTIC(&status_uuid.uuid,
