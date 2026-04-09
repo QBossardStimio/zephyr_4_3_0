@@ -34,6 +34,7 @@
 
 #include "uart_relay.h"
 #include "ots_handler.h"
+#include "config_service.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -233,6 +234,51 @@ void uart_relay_send_delete_ack(void)
 	sotp_send_frame(SOTP_TYPE_DELETE_ACK, NULL, 0U);
 }
 
+int uart_relay_send_config_read(uint8_t file_id, uint8_t field_id)
+{
+	if (!device_is_ready(uart_dev)) {
+		return -ENODEV;
+	}
+
+	uint8_t payload[2] = { file_id, field_id };
+	LOG_INF("config_read_req: file=0x%02x field=0x%02x → iMX6",
+		file_id, field_id);
+	sotp_send_frame(SOTP_TYPE_CONFIG_READ_REQ, payload, 2U);
+	return 0;
+}
+
+int uart_relay_send_config_write(uint8_t file_id, uint8_t field_id,
+				 const void *value, uint16_t value_len)
+{
+	if (!device_is_ready(uart_dev)) {
+		return -ENODEV;
+	}
+
+	uint8_t payload[2 + 248];
+	payload[0] = file_id;
+	payload[1] = field_id;
+
+	uint16_t vlen = (value_len > 248) ? 248 : value_len;
+	memcpy(payload + 2, value, vlen);
+
+	LOG_INF("config_write: file=0x%02x field=0x%02x vlen=%u → iMX6",
+		file_id, field_id, vlen);
+	sotp_send_frame(SOTP_TYPE_CONFIG_WRITE, payload, (uint32_t)(2 + vlen));
+	return 0;
+}
+
+int uart_relay_send_config_commit(uint8_t file_id)
+{
+	if (!device_is_ready(uart_dev)) {
+		return -ENODEV;
+	}
+
+	uint8_t payload[1] = { file_id };
+	LOG_INF("config_commit: file=0x%02x → iMX6", file_id);
+	sotp_send_frame(SOTP_TYPE_CONFIG_COMMIT, payload, 1U);
+	return 0;
+}
+
 /* -------------------------------------------------------------------------
  * RX : state machine de réception SOTP
  * ------------------------------------------------------------------------- */
@@ -337,6 +383,15 @@ static void sotp_dispatch(uint8_t type, const uint8_t *payload, uint32_t len)
 	case SOTP_TYPE_STATUS:
 		/* Statut périodique de l'iMX6 — log informatif */
 		LOG_INF("sotp_dispatch: STATUS from iMX6 (len=%u)", len);
+		break;
+
+	/* Config service responses from iMX6 */
+	case SOTP_TYPE_CONFIG_READ_RSP:
+	case SOTP_TYPE_CONFIG_WRITE_RSP:
+	case SOTP_TYPE_CONFIG_COMMIT_RSP:
+		LOG_DBG("sotp_dispatch: config RSP type=0x%02x len=%u",
+			type, len);
+		config_service_handle_response(type, payload, len);
 		break;
 
 	default:

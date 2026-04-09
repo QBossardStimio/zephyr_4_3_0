@@ -33,10 +33,21 @@
 #define SOTP_TYPE_FILE_REQUEST  0x06
 #define SOTP_TYPE_DELETE_ACK    0x07
 
+/** Configuration service SOTP types */
+#define SOTP_TYPE_CONFIG_READ_REQ   0x10
+#define SOTP_TYPE_CONFIG_READ_RSP   0x11
+#define SOTP_TYPE_CONFIG_WRITE      0x12
+#define SOTP_TYPE_CONFIG_WRITE_RSP  0x13
+#define SOTP_TYPE_CONFIG_COMMIT     0x14
+#define SOTP_TYPE_CONFIG_COMMIT_RSP 0x15
+
 /** Codes d'erreur NACK */
 #define SOTP_ERR_BUFFER_FULL    0x01
 #define SOTP_ERR_TIMEOUT        0x02
 #define SOTP_ERR_CRC            0x03
+#define SOTP_ERR_NOT_FOUND      0x10
+#define SOTP_ERR_IO             0x12
+#define SOTP_ERR_INVALID        0x13
 
 /**
  * @brief Initialise l'UART et le thread de réception SOTP.
@@ -70,5 +81,31 @@ int uart_relay_send_file_request(const uint8_t *path, size_t len);
  * lors d'un FILE_REQUEST multi-chunk.
  */
 void uart_relay_send_delete_ack(void);
+
+/**
+ * @brief Envoie CONFIG_READ_REQ vers l'iMX6.
+ * @param file_id   Identifiant du fichier config (0x00 = /etc/stimio/config.json)
+ * @param field_id  Identifiant du champ dans le fichier
+ * @return 0 si succès, code d'erreur négatif sinon.
+ */
+int uart_relay_send_config_read(uint8_t file_id, uint8_t field_id);
+
+/**
+ * @brief Envoie CONFIG_WRITE vers l'iMX6.
+ * @param file_id    Identifiant du fichier config
+ * @param field_id   Identifiant du champ
+ * @param value      Valeur UTF-8
+ * @param value_len  Longueur de la valeur en octets
+ * @return 0 si succès, code d'erreur négatif sinon.
+ */
+int uart_relay_send_config_write(uint8_t file_id, uint8_t field_id,
+				 const void *value, uint16_t value_len);
+
+/**
+ * @brief Envoie CONFIG_COMMIT vers l'iMX6.
+ * @param file_id  Identifiant du fichier config
+ * @return 0 si succès, code d'erreur négatif sinon.
+ */
+int uart_relay_send_config_commit(uint8_t file_id);
 
 #endif /* UART_RELAY_H_ */

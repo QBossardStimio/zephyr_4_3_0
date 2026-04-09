@@ -19,4 +19,5 @@ target_sources(app PRIVATE
     src/main.c
     src/ots_handler.c
     src/uart_relay.c
+    src/config_service.c
 )

@@ -44,6 +44,7 @@
 
 #include "ots_handler.h"
 #include "uart_relay.h"
+#include "config_service.h"
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
@@ -209,6 +210,13 @@ static void bt_ready_cb(int err)
 	ret = uart_relay_init();
 	if (ret) {
 		LOG_ERR("uart_relay_init failed: %d", ret);
+		return;
+	}
+
+	/* Initialiser le service GATT de configuration BLE */
+	ret = config_service_init();
+	if (ret) {
+		LOG_ERR("config_service_init failed: %d", ret);
 		return;
 	}
 
