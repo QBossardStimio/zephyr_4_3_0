@@ -223,6 +223,16 @@ int uart_relay_send_file_request(const uint8_t *path, size_t len)
 	return 0;
 }
 
+void uart_relay_send_delete_ack(void)
+{
+	if (!device_is_ready(uart_dev)) {
+		return;
+	}
+
+	LOG_DBG("uart_relay_send_delete_ack: DELETE_ACK → iMX6");
+	sotp_send_frame(SOTP_TYPE_DELETE_ACK, NULL, 0U);
+}
+
 /* -------------------------------------------------------------------------
  * RX : state machine de réception SOTP
  * ------------------------------------------------------------------------- */

@@ -96,6 +96,9 @@ static struct bt_ots *ots_instance;
 /* Macro de mapping ID → index de slot (identique au sample upstream) */
 #define OBJ_ID_TO_IDX(id)  (((id) - BT_OTS_OBJ_ID_MIN) % (uint64_t)CONFIG_BT_OTS_MAX_OBJ_CNT)
 
+/** Flag pour exclure les DELETE_ACK pendant le cleanup de déconnexion */
+static bool cleaning_up;
+
 /*
  * Work item pour différer bt_ots_obj_delete après retour de obj_write.
  *
@@ -243,6 +246,21 @@ static int obj_deleted(struct bt_ots *ots, struct bt_conn *conn, uint64_t id)
 	LOG_INF("obj_deleted: id=%s idx=%llu (pool: %u/%zu)",
 		id_str, (unsigned long long)idx,
 		obj_count, ARRAY_SIZE(obj_pool));
+
+	/*
+	 * Envoyer un DELETE_ACK SOTP vers l'iMX6 pour signaler la suppression.
+	 * Le sotp-bridge attend ce DELETE_ACK avant d'envoyer le chunk suivant
+	 * lors d'un FILE_REQUEST multi-chunk.
+	 *
+	 * Note : bt_ots_obj_delete() passe toujours conn=NULL au callback,
+	 * donc on ne peut pas distinguer OACP Delete d'une suppression interne
+	 * via conn. On utilise un flag cleaning_up pour exclure le cleanup
+	 * de déconnexion et le k_work delete (pending_delete_id != 0).
+	 */
+	if (!cleaning_up) {
+		LOG_INF("obj_deleted: sending DELETE_ACK to iMX6");
+		uart_relay_send_delete_ack();
+	}
 
 	return 0;
 }
@@ -494,6 +512,8 @@ struct bt_ots *ots_get_instance(void)
 
 void ots_handler_cleanup_on_disconnect(void)
 {
+	cleaning_up = true;
+
 	/*
 	 * Supprimer chaque objet de la stack Zephyr OTS via bt_ots_obj_delete().
 	 * Sans cela, la stack OTS garde ses objets internes même si on remet
@@ -515,6 +535,7 @@ void ots_handler_cleanup_on_disconnect(void)
 		obj_pool[i].name[0]     = '\0';
 	}
 	obj_count = 0;
+	cleaning_up = false;
 	LOG_INF("ots_handler_cleanup_on_disconnect: pool réinitialisé");
 }
 

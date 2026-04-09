@@ -31,6 +31,7 @@
 #define SOTP_TYPE_NACK          0x04
 #define SOTP_TYPE_STATUS        0x05
 #define SOTP_TYPE_FILE_REQUEST  0x06
+#define SOTP_TYPE_DELETE_ACK    0x07
 
 /** Codes d'erreur NACK */
 #define SOTP_ERR_BUFFER_FULL    0x01
@@ -61,5 +62,13 @@ int uart_relay_send_object(const uint8_t *data, size_t len);
  * @return 0 si succès, code d'erreur négatif sinon.
  */
 int uart_relay_send_file_request(const uint8_t *path, size_t len);
+
+/**
+ * @brief Envoie un ACK SOTP pour signaler qu'un objet a été supprimé par le client BLE.
+ *
+ * Utilisé par le sotp-bridge pour synchroniser l'envoi de chunks
+ * lors d'un FILE_REQUEST multi-chunk.
+ */
+void uart_relay_send_delete_ack(void);
 
 #endif /* UART_RELAY_H_ */
