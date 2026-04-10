@@ -111,16 +111,36 @@ int main(void)
 	}
 	uart_irq_rx_enable(uart_dev);
 
-	print_uart("Hello! I'm your echo bot.\r\n");
-	print_uart("Tell me something and press enter:\r\n");
+	/*
+	 * Debug : lire les deux pins de flow control du nRF52840
+	 *
+	 * D'après le schéma RailNet200 (STO06 sheet 5 + 19) :
+	 *   ball 55 (ENET2_TX_CLK) = BLE_UART_CTS → NINA pin 20 = P0.31
+	 *   ball 58 (ENET2_RX_ER)  = BLE_UART_RTS → NINA pin 21 = P1.12
+	 *
+	 * GPIO P0 IN register = 0x50000510, P0.31 = bit 31
+	 * GPIO P1 IN register = 0x50000810, P1.12 = bit 12
+	 */
+	volatile uint32_t *gpio0_in = (volatile uint32_t *)0x50000510;
+	volatile uint32_t *gpio1_in = (volatile uint32_t *)0x50000810;
 
-	/* send 0xDE 0xCA 0xFB 0xAD continuously for testing */
-	static const uint8_t pattern[] = { 0xDE, 0xCA, 0xFB, 0xAD };
 	while (1) {
-		for (int i = 0; i < sizeof(pattern); i++) {
-			uart_poll_out(uart_dev, pattern[i]);
+		uint32_t p0 = *gpio0_in;
+		uint32_t p1 = *gpio1_in;
+		uint32_t pin_p0_31 = (p0 >> 31) & 1;  /* ball 55 = BLE_UART_CTS */
+		uint32_t pin_p1_12 = (p1 >> 12) & 1;  /* ball 58 = BLE_UART_RTS */
+
+		printk("P0.31(ball55/CTS)=%u  P1.12(ball58/RTS)=%u\n",
+		       pin_p0_31, pin_p1_12);
+
+		/* Envoyer un test byte si au moins un signal est LOW */
+		if (pin_p0_31 == 0 || pin_p1_12 == 0) {
+			printk("  -> Signal LOW! Sending 0xAA...\n");
+			uart_poll_out(uart_dev, 0xAA);
+			printk("  -> Sent OK\n");
 		}
-		k_sleep(K_MSEC(1));
+
+		k_sleep(K_MSEC(1000));
 	}
 	return 0;
 }

@@ -17,10 +17,10 @@
  *   Les deux firmwares peuvent coexister sans modifier le DTS partagé.
  *
  * Note baudrate :
- *   - RailNet200 v1.1 : RTS/CTS NON câblés → 115200 baud, noflow (DTS de base)
- *   - RailNet200 v1.3 : à vérifier sur schémas (docs/reference_schemas_railnet200.md)
- *     Si RTS/CTS câblés sur v1.3, décommenter le bloc &uart0 ci-dessous
- *     et augmenter à 1 Mbaud pour réduire la latence de relay.
+ *   - RailNet200 v1.1 + v1.3 : RTS/CTS câblés et validés (2026-04-10)
+ *     Board DTS : 115200 baud + hw-flow-control activé
+ *     Pinctrl NINA corrigé : CTS=P0.31 (ball55), RTS=P1.12 (ball58)
+ *     Voir docs/uart-rtscts-imx6-nina-debug.md pour l'historique complet
  *
  * Convention de nommage DT_CHOSEN :
  *   Le nom du chosen node `zephyr,sotp-uart` se mappe vers DT_CHOSEN(zephyr_sotp_uart)
@@ -46,12 +46,10 @@
  * Décommenter pour 1 Mbaud quand le sotp-bridge iMX6 est aussi à 1 Mbaud.
  */
 /*
- * 1 Mbaud + hw-flow-control : nécessite vérification du DTS iMX6
- * (pins RTS/CTS ttymxc7 dans le pinmux). Bloqué tant que le iMX6
- * n'asserte pas RTS → NINA CTS inactif → uart_poll_out bloque.
+ * 1 Mbaud : décommenter quand le sotp-bridge iMX6 est aussi à 1 Mbaud.
+ * hw-flow-control est déjà activé dans le board DTS.
  *
  * &uart0 {
  *     current-speed = <1000000>;
- *     hw-flow-control;
  * };
  */
