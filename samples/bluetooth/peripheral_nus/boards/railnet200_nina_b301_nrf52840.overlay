@@ -1,0 +1,12 @@
+/*
+ * Overlay peripheral_nus — RailNet200 NINA-B301
+ *
+ * Retire l'affectation HCI de uart0 et l'expose comme UART applicatif
+ * pour le bridge NUS↔UART vers l'iMX6.
+ */
+
+/ {
+	chosen {
+		/delete-property/ zephyr,bt-c2h-uart;
+	};
+};

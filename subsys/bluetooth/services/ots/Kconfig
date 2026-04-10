@@ -98,8 +98,11 @@ config BT_OTS_L2CAP_CHAN_TX_MTU
 
 config BT_OTS_L2CAP_CHAN_RX_MTU
 	int "Size of RX MTU for Object Transfer Channel"
-	# RX MTU will be truncated to account for the L2CAP PDU and SDU header.
+	# Sans SEG_RECV : rx.mtu doit tenir dans un buffer ACL → borné à BT_BUF_ACL_RX_SIZE.
+	# Avec SEG_RECV : rx.mtu est juste un champ déclaratif (pas de buffer de cette taille)
+	# → on peut l'étendre jusqu'à 65533 (max L2CAP LE SDU length).
 	default BT_BUF_ACL_RX_SIZE
+	range 21 65533 if BT_L2CAP_SEG_RECV
 	range 21 BT_BUF_ACL_RX_SIZE
 
 config BT_OTS_OBJ_MAX_NAME_LEN

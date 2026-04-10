@@ -42,6 +42,7 @@ void serial_cb(const struct device *dev, void *user_data)
 
 	/* read until FIFO empty */
 	while (uart_fifo_read(uart_dev, &c, 1) == 1) {
+		printk("RX: 0x%02x\n", c);
 		if ((c == '\n' || c == '\r') && rx_buf_pos > 0) {
 			/* terminate string */
 			rx_buf[rx_buf_pos] = '\0';
@@ -74,9 +75,25 @@ int main(void)
 {
 	char tx_buf[MSG_SIZE];
 
+	printk("echo_bot main() started\n");
+
 	if (!device_is_ready(uart_dev)) {
-		printk("UART device not found!");
+		printk("UART device not ready!\n");
 		return 0;
+	}
+
+	printk("UART device ready, starting echo\n");
+
+	struct uart_config cfg;
+	if (uart_config_get(uart_dev, &cfg) == 0) {
+		printk("UART config:\n");
+		printk("  baudrate:  %d\n", cfg.baudrate);
+		printk("  parity:    %d\n", cfg.parity);
+		printk("  stop_bits: %d\n", cfg.stop_bits);
+		printk("  data_bits: %d\n", cfg.data_bits);
+		printk("  flow_ctrl: %d\n", cfg.flow_ctrl);
+	} else {
+		printk("uart_config_get failed\n");
 	}
 
 	/* configure interrupt and callback to receive data */
@@ -94,14 +111,36 @@ int main(void)
 	}
 	uart_irq_rx_enable(uart_dev);
 
-	print_uart("Hello! I'm your echo bot.\r\n");
-	print_uart("Tell me something and press enter:\r\n");
+	/*
+	 * Debug : lire les deux pins de flow control du nRF52840
+	 *
+	 * D'après le schéma RailNet200 (STO06 sheet 5 + 19) :
+	 *   ball 55 (ENET2_TX_CLK) = BLE_UART_CTS → NINA pin 20 = P0.31
+	 *   ball 58 (ENET2_RX_ER)  = BLE_UART_RTS → NINA pin 21 = P1.12
+	 *
+	 * GPIO P0 IN register = 0x50000510, P0.31 = bit 31
+	 * GPIO P1 IN register = 0x50000810, P1.12 = bit 12
+	 */
+	volatile uint32_t *gpio0_in = (volatile uint32_t *)0x50000510;
+	volatile uint32_t *gpio1_in = (volatile uint32_t *)0x50000810;
 
-	/* indefinitely wait for input from the user */
-	while (k_msgq_get(&uart_msgq, &tx_buf, K_FOREVER) == 0) {
-		print_uart("Echo: ");
-		print_uart(tx_buf);
-		print_uart("\r\n");
+	while (1) {
+		uint32_t p0 = *gpio0_in;
+		uint32_t p1 = *gpio1_in;
+		uint32_t pin_p0_31 = (p0 >> 31) & 1;  /* ball 55 = BLE_UART_CTS */
+		uint32_t pin_p1_12 = (p1 >> 12) & 1;  /* ball 58 = BLE_UART_RTS */
+
+		printk("P0.31(ball55/CTS)=%u  P1.12(ball58/RTS)=%u\n",
+		       pin_p0_31, pin_p1_12);
+
+		/* Envoyer un test byte si au moins un signal est LOW */
+		if (pin_p0_31 == 0 || pin_p1_12 == 0) {
+			printk("  -> Signal LOW! Sending 0xAA...\n");
+			uart_poll_out(uart_dev, 0xAA);
+			printk("  -> Sent OK\n");
+		}
+
+		k_sleep(K_MSEC(1000));
 	}
 	return 0;
 }

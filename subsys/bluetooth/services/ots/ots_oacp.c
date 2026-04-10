@@ -29,6 +29,11 @@ LOG_MODULE_DECLARE(bt_ots, CONFIG_BT_OTS_LOG_LEVEL);
 #if defined(CONFIG_BT_OTS_OACP_WRITE_SUPPORT)
 static ssize_t oacp_write_proc_cb(struct bt_gatt_ots_l2cap *l2cap_ctx,
 			struct bt_conn *conn, struct net_buf *buf);
+#if defined(CONFIG_BT_L2CAP_SEG_RECV)
+static ssize_t oacp_write_seg_cb(struct bt_gatt_ots_l2cap *l2cap_ctx,
+			struct bt_conn *conn, size_t sdu_len,
+			off_t seg_offset, struct net_buf_simple *seg);
+#endif
 #endif
 
 static void oacp_l2cap_closed(struct bt_gatt_ots_l2cap *l2cap_ctx,
@@ -307,7 +312,12 @@ static enum bt_gatt_ots_oacp_res_code oacp_write_proc_validate(
 		return BT_GATT_OTS_OACP_RES_OBJ_LOCKED;
 	}
 
+#if defined(CONFIG_BT_L2CAP_SEG_RECV)
+	ots->l2cap.seg_rx_done = oacp_write_seg_cb;
+	ots->l2cap.rx_done = NULL;
+#else
 	ots->l2cap.rx_done = oacp_write_proc_cb;
+#endif
 	ots->l2cap.closed = oacp_l2cap_closed;
 	ots->cur_obj->state.type = BT_GATT_OTS_OBJECT_WRITE_OP_STATE;
 	ots->cur_obj->state.write_op.recv_len = 0;
@@ -535,14 +545,14 @@ static void oacp_read_proc_execute(struct bt_ots *ots,
 }
 
 #if defined(CONFIG_BT_OTS_OACP_WRITE_SUPPORT)
-static ssize_t oacp_write_proc_cb(struct bt_gatt_ots_l2cap *l2cap_ctx,
-			struct bt_conn *conn, struct net_buf *buf)
+/* Logique commune Write : écrit len octets depuis data à l'offset donné. */
+static ssize_t oacp_write_common(struct bt_gatt_ots_l2cap *l2cap_ctx,
+				 struct bt_conn *conn,
+				 const uint8_t *data, size_t len, off_t offset)
 {
 	struct bt_gatt_ots_object_write_op *write_op;
 	struct bt_ots *ots;
-	off_t offset;
 	size_t rem;
-	size_t len;
 	ssize_t rc;
 
 	ots = CONTAINER_OF(l2cap_ctx, struct bt_ots, l2cap);
@@ -560,24 +570,18 @@ static ssize_t oacp_write_proc_cb(struct bt_gatt_ots_l2cap *l2cap_ctx,
 	}
 
 	write_op = &ots->cur_obj->state.write_op;
-	offset = write_op->oacp_params.offset + write_op->recv_len;
-	len = buf->len;
 	if (write_op->recv_len + len > write_op->oacp_params.len) {
 		LOG_WRN("More bytes received than the client indicated");
 		len = write_op->oacp_params.len - write_op->recv_len;
 	}
 	rem = write_op->oacp_params.len - (write_op->recv_len + len);
 
-	rc = ots->cb->obj_write(ots, conn, ots->cur_obj->id, buf->data, len,
-				  offset, rem);
+	rc = ots->cb->obj_write(ots, conn, ots->cur_obj->id, data, len,
+				offset, rem);
 
 	if (rc < 0) {
 		len = 0;
 
-		/*
-		 * Returning an EINPROGRESS return code results in the write buffer not being
-		 * released by the l2cap layer. This is an unsupported use case at the moment.
-		 */
 		if (rc == -EINPROGRESS) {
 			LOG_ERR("Unsupported error code %zd returned by object write callback", rc);
 		}
@@ -585,8 +589,7 @@ static ssize_t oacp_write_proc_cb(struct bt_gatt_ots_l2cap *l2cap_ctx,
 		LOG_ERR("OTS Write operation failed with error: %zd", rc);
 		ots->cur_obj->state.type = BT_GATT_OTS_OBJECT_IDLE_STATE;
 	} else {
-		/* Return -EIO as an error if all of data was not written */
-		if (rc != len) {
+		if (rc != (ssize_t)len) {
 			len = rc;
 			rc = -EIO;
 		}
@@ -598,12 +601,66 @@ static ssize_t oacp_write_proc_cb(struct bt_gatt_ots_l2cap *l2cap_ctx,
 		ots->cur_obj->state.type = BT_GATT_OTS_OBJECT_IDLE_STATE;
 	}
 
-	if (offset + len > ots->cur_obj->metadata.size.cur) {
+	if (offset + (off_t)len > ots->cur_obj->metadata.size.cur) {
 		ots->cur_obj->metadata.size.cur = offset + len;
 	}
 
 	return rc;
 }
+
+static ssize_t oacp_write_proc_cb(struct bt_gatt_ots_l2cap *l2cap_ctx,
+			struct bt_conn *conn, struct net_buf *buf)
+{
+	struct bt_gatt_ots_object_write_op *write_op;
+	struct bt_ots *ots;
+	off_t offset;
+
+	ots = CONTAINER_OF(l2cap_ctx, struct bt_ots, l2cap);
+	write_op = &ots->cur_obj->state.write_op;
+	offset = write_op->oacp_params.offset + write_op->recv_len;
+
+	return oacp_write_common(l2cap_ctx, conn, buf->data, buf->len, offset);
+}
+
+#if defined(CONFIG_BT_L2CAP_SEG_RECV)
+/* Callback seg_rx_done : appelé pour chaque segment PDU reçu.
+ *
+ * Calcul de l'offset dans l'objet :
+ *   On utilise write_op->recv_len (total des bytes déjà écrits) plutôt que
+ *   seg_offset (offset dans le SDU courant). Cela permet deux modes :
+ *
+ *   1. Un seul gros SDU (multi-PDU) : seg_offset progresse dans le SDU,
+ *      mais recv_len donne le même résultat car recv_len == seg_offset
+ *      quand il n'y a qu'un seul SDU.
+ *
+ *   2. Plusieurs petits SDUs (1 PDU chacun) : seg_offset est toujours 0
+ *      pour chaque nouveau SDU, mais recv_len s'accumule correctement
+ *      à travers les SDUs successifs.
+ */
+static ssize_t oacp_write_seg_cb(struct bt_gatt_ots_l2cap *l2cap_ctx,
+				 struct bt_conn *conn, size_t sdu_len,
+				 off_t seg_offset, struct net_buf_simple *seg)
+{
+	struct bt_gatt_ots_object_write_op *write_op;
+	struct bt_ots *ots;
+	off_t offset;
+
+	ARG_UNUSED(sdu_len);
+	ARG_UNUSED(seg_offset);
+
+	ots = CONTAINER_OF(l2cap_ctx, struct bt_ots, l2cap);
+
+	if (!ots->cur_obj) {
+		LOG_ERR("Invalid Current Object on OACP Write seg procedure");
+		return -ENODEV;
+	}
+
+	write_op = &ots->cur_obj->state.write_op;
+	offset = write_op->oacp_params.offset + write_op->recv_len;
+
+	return oacp_write_common(l2cap_ctx, conn, seg->data, seg->len, offset);
+}
+#endif /* CONFIG_BT_L2CAP_SEG_RECV */
 #endif
 
 static void oacp_ind_cb(struct bt_conn *conn,
