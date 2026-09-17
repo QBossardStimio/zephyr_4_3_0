@@ -31,6 +31,15 @@ struct bt_gatt_ots_l2cap {
 			struct bt_conn *conn);
 	ssize_t (*rx_done)(struct bt_gatt_ots_l2cap *l2cap_ctx,
 			   struct bt_conn *conn, struct net_buf *buf);
+#if defined(CONFIG_BT_L2CAP_SEG_RECV)
+	/* Appelé pour chaque segment reçu (avec CONFIG_BT_L2CAP_SEG_RECV).
+	 * seg_offset : offset de ce segment dans le SDU complet.
+	 * sdu_len    : taille totale du SDU (= taille de l'objet à écrire).
+	 */
+	ssize_t (*seg_rx_done)(struct bt_gatt_ots_l2cap *l2cap_ctx,
+			       struct bt_conn *conn, size_t sdu_len,
+			       off_t seg_offset, struct net_buf_simple *seg);
+#endif
 	void (*closed)(struct bt_gatt_ots_l2cap *l2cap_ctx,
 			struct bt_conn *conn);
 };

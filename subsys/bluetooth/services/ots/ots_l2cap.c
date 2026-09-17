@@ -37,10 +37,15 @@ NET_BUF_POOL_FIXED_DEFINE(ot_chan_tx_pool, 1,
 			  BT_L2CAP_SDU_BUF_SIZE(CONFIG_BT_OTS_L2CAP_CHAN_TX_MTU),
 			  CONFIG_BT_CONN_TX_USER_DATA_SIZE, NULL);
 
+/* Avec CONFIG_BT_L2CAP_SEG_RECV, les segments sont reçus directement depuis
+ * le pool ACL global — pas besoin d'un pool RX dédié pour l'OTS.
+ */
+#if !defined(CONFIG_BT_L2CAP_SEG_RECV)
 #if (CONFIG_BT_OTS_L2CAP_CHAN_RX_MTU > BT_L2CAP_SDU_RX_MTU)
-NET_BUF_POOL_FIXED_DEFINE(ot_chan_rx_pool, 1, CONFIG_BT_OTS_L2CAP_CHAN_RX_MTU, 8,
-			  NULL);
+NET_BUF_POOL_FIXED_DEFINE(ot_chan_rx_pool, 1,
+			  CONFIG_BT_OTS_L2CAP_CHAN_RX_MTU, 8, NULL);
 #endif
+#endif /* !CONFIG_BT_L2CAP_SEG_RECV */
 
 /* List of Object Transfer Channels. */
 static sys_slist_t channels;
@@ -76,6 +81,7 @@ static int ots_l2cap_send(struct bt_gatt_ots_l2cap *l2cap_ctx)
 	return 0;
 }
 
+#if !defined(CONFIG_BT_L2CAP_SEG_RECV)
 #if (CONFIG_BT_OTS_L2CAP_CHAN_RX_MTU > BT_L2CAP_SDU_RX_MTU)
 static struct net_buf *l2cap_alloc_buf(struct bt_l2cap_chan *chan)
 {
@@ -84,6 +90,40 @@ static struct net_buf *l2cap_alloc_buf(struct bt_l2cap_chan *chan)
 	return net_buf_alloc(&ot_chan_rx_pool, K_FOREVER);
 }
 #endif
+#endif /* !CONFIG_BT_L2CAP_SEG_RECV */
+
+#if defined(CONFIG_BT_L2CAP_SEG_RECV)
+/* Appelé par Zephyr L2CAP pour chaque segment PDU reçu.
+ * Pas de buffer complet en RAM — les données sont passées directement
+ * au callback seg_rx_done (→ oacp_write_proc_cb par segments).
+ */
+static void l2cap_seg_recv(struct bt_l2cap_chan *chan, size_t sdu_len,
+			   off_t seg_offset, struct net_buf_simple *seg)
+{
+	struct bt_l2cap_le_chan *l2chan = CONTAINER_OF(chan, struct bt_l2cap_le_chan, chan);
+	struct bt_gatt_ots_l2cap *l2cap_ctx;
+
+	l2cap_ctx = CONTAINER_OF(l2chan, struct bt_gatt_ots_l2cap, ot_chan);
+
+	LOG_DBG("seg_recv chan %p sdu_len %zu offset %ld seg_len %u",
+		chan, sdu_len, (long)seg_offset, seg->len);
+
+	if (!l2cap_ctx->seg_rx_done) {
+		return;
+	}
+
+	l2cap_ctx->seg_rx_done(l2cap_ctx, chan->conn, sdu_len, seg_offset, seg);
+
+	/* Réémettre un crédit pour chaque PDU traité.
+	 * Sans cela le transfert s'arrête après les crédits initiaux.
+	 */
+	int err = bt_l2cap_chan_give_credits(chan, 1);
+
+	if (err) {
+		LOG_WRN("Failed to give L2CAP credit: %d", err);
+	}
+}
+#endif /* CONFIG_BT_L2CAP_SEG_RECV */
 
 
 static void l2cap_sent(struct bt_l2cap_chan *chan)
@@ -136,6 +176,19 @@ static void l2cap_status(struct bt_l2cap_chan *chan, atomic_t *status)
 static void l2cap_connected(struct bt_l2cap_chan *chan)
 {
 	LOG_DBG("Channel %p connected", chan);
+
+#if defined(CONFIG_BT_L2CAP_SEG_RECV)
+	/* Accorder des crédits initiaux supplémentaires pour permettre à Ubuntu
+	 * d'envoyer plusieurs PDUs en rafale sans attendre un crédit à la fois.
+	 * bt_l2cap_chan_give_credits n'est disponible qu'avec CONFIG_BT_L2CAP_SEG_RECV.
+	 */
+	int err = bt_l2cap_chan_give_credits(chan, CONFIG_BT_BUF_ACL_RX_COUNT_EXTRA);
+	if (err) {
+		LOG_WRN("Failed to give L2CAP credits: %d", err);
+	} else {
+		LOG_DBG("Gave %d extra L2CAP RX credits", CONFIG_BT_BUF_ACL_RX_COUNT_EXTRA);
+	}
+#endif
 }
 
 static void l2cap_disconnected(struct bt_l2cap_chan *chan)
@@ -153,11 +206,16 @@ static void l2cap_disconnected(struct bt_l2cap_chan *chan)
 }
 
 static const struct bt_l2cap_chan_ops l2cap_ops = {
+#if defined(CONFIG_BT_L2CAP_SEG_RECV)
+	/* Avec SEG_RECV : pas d'alloc_buf, pas de recv — seulement seg_recv. */
+	.seg_recv	= l2cap_seg_recv,
+#else
 #if (CONFIG_BT_OTS_L2CAP_CHAN_RX_MTU > BT_L2CAP_SDU_RX_MTU)
 	.alloc_buf	= l2cap_alloc_buf,
 #endif
-	.sent		= l2cap_sent,
 	.recv		= l2cap_recv,
+#endif /* CONFIG_BT_L2CAP_SEG_RECV */
+	.sent		= l2cap_sent,
 	.status		= l2cap_status,
 	.connected	= l2cap_connected,
 	.disconnected	= l2cap_disconnected,
@@ -168,7 +226,30 @@ static inline void l2cap_chan_init(struct bt_l2cap_le_chan *chan)
 	chan->rx.mtu = CONFIG_BT_OTS_L2CAP_CHAN_RX_MTU;
 	chan->chan.ops = &l2cap_ops;
 
-	LOG_DBG("RX MTU set to %u", chan->rx.mtu);
+#if defined(CONFIG_BT_L2CAP_SEG_RECV)
+	/* rx.mps = DLE_max(251) - L2CAP_HDR(4) - SDU_LEN_HDR(2) = 245.
+	 *
+	 * Structure d'un PDU L2CAP CoC complet :
+	 *   [L2CAP_HDR 4B][SDU_LEN 2B (premier PDU seulement)][data rx.mps B]
+	 *
+	 * Le SDU_LEN (2 bytes) est présent UNIQUEMENT dans le premier PDU du SDU.
+	 * Pour tenir dans un seul LL PDU DLE (251 bytes max) :
+	 *   4 + 2 + rx.mps ≤ 251  →  rx.mps ≤ 245.
+	 *
+	 * ATTENTION : Zephyr l2cap.c écrase rx.mps si rx.mps > BT_L2CAP_RX_MTU
+	 * (= CONFIG_BT_BUF_ACL_RX_SIZE - 4). Il faut donc que BT_L2CAP_RX_MTU ≥ 245,
+	 * soit ACL_RX_SIZE ≥ 249. Avec CONFIG_BT_BUF_ACL_RX_SIZE=251 :
+	 * BT_L2CAP_RX_MTU=247 ≥ 245 → rx.mps=245 conservé.
+	 *
+	 * Règle : rx.mps = CONFIG_BT_CTLR_DATA_LENGTH_MAX - BT_L2CAP_HDR_SIZE
+	 *                  - BT_L2CAP_SDU_HDR_SIZE
+	 *               = 251 - 4 - 2 = 245.
+	 */
+	chan->rx.mps = CONFIG_BT_CTLR_DATA_LENGTH_MAX - BT_L2CAP_HDR_SIZE
+		       - BT_L2CAP_SDU_HDR_SIZE;
+#endif
+
+	LOG_DBG("RX MTU set to %u, MPS set to %u", chan->rx.mtu, chan->rx.mps);
 }
 
 static struct bt_gatt_ots_l2cap *find_free_l2cap_ctx(void)
